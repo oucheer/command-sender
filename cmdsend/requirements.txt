@@ -1,0 +1,6 @@
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+pyserial>=3.5
+pywin32>=300
+psutil>=5.8.0
+keyboard>=0.13.5
