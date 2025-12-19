@@ -448,20 +448,51 @@ class KeyboardSimulator:
             return False
     
     def send_text_securecrt(self, hwnd, text):
-        """SecureCRT特定文本发送策略 - 与MobaXterm完全一致"""
+        """SecureCRT特定文本发送策略 - 优化版，参考PowerShell实现"""
         try:
             terminal_type = "securecrt"
+            logger.info(f"开始向SecureCRT窗口发送文本: {hwnd}, 文本: {text!r}")
             
             # 确保win32api和win32con已正确加载
             if not self.win32api or not self.win32con:
                 logger.error(f"{terminal_type} win32api或win32con未正确加载，无法发送命令")
                 return False
             
+            # 获取实际的SecureCRT输入窗口
+            actual_hwnd = hwnd
+            
+            # 检查窗口类名，了解SecureCRT窗口结构
+            window_class = self.win32gui.GetClassName(hwnd)
+            logger.info(f"SecureCRT窗口类名: {window_class}")
+            
+            # 遍历子窗口，查找可能的输入区域
+            try:
+                child_windows = []
+                
+                def enum_child_callback(child_hwnd, param):
+                    param.append(child_hwnd)
+                    return True
+                
+                self.win32gui.EnumChildWindows(hwnd, enum_child_callback, child_windows)
+                logger.info(f"找到 {len(child_windows)} 个子窗口")
+                
+                # 遍历子窗口，查找合适的输入窗口
+                for child_hwnd in child_windows:
+                    child_class = self.win32gui.GetClassName(child_hwnd)
+                    logger.info(f"子窗口 {child_hwnd}: 类名={child_class}")
+                    # 选择第一个子窗口作为实际输入区域
+                    actual_hwnd = child_hwnd
+                    break
+                
+                logger.info(f"使用窗口 {actual_hwnd} 作为实际输入区域")
+            except Exception as e:
+                logger.warning(f"获取SecureCRT子窗口失败: {e}，使用主窗口作为输入区域")
+            
             # 从延迟缓存中获取当前终端的最佳延迟值
             base_delay = self.delay_cache.get(terminal_type, 0.01)
             logger.info(f"使用{terminal_type}延迟: {base_delay} 秒")
             
-            # 与MobaXterm完全一致的发送逻辑
+            # 发送逻辑
             win32api = self.win32api
             win32con = self.win32con
             post_message = win32api.PostMessage
@@ -470,27 +501,34 @@ class KeyboardSimulator:
             
             # 使用缓存的延迟
             delay = base_delay
+            logger.info(f"SecureCRT发送延迟设置: {delay} 秒")
             
-            # 与MobaXterm完全一致的字符发送逻辑
-            for char in text:
+            # 优化的字符发送逻辑
+            for i, char in enumerate(text):
                 char_code = ord(char)
+                logger.debug(f"SecureCRT发送第 {i+1}/{len(text)} 个字符: {char!r}, 字符码: {char_code}")
                 
                 # 发送字符，包括空格，只发送WM_CHAR消息
-                post_message(hwnd, wm_char, char_code, 0)
+                post_message(actual_hwnd, wm_char, char_code, 0)
                 
                 # 根据字符类型动态调整延迟
                 if char == ' ':
                     # 空格字符使用适中延迟
                     sleep(delay)
+                elif char in '!@#$%^&*()_+-=[]{}|;:,.<>?':
+                    # 特殊字符使用较长延迟
+                    sleep(delay * 1.5)
                 else:
                     # 普通字符使用标准发送方式，使用适中延迟
                     sleep(delay)
             
             # 发送成功，尝试微调延迟，减少下一次发送的延迟
             self.adjust_delay(terminal_type, success=True)
+            logger.info(f"SecureCRT文本发送成功: {text!r}")
             return True
         except Exception as e:
             logger.error(f"{terminal_type}文本发送失败: {e}")
+            logger.debug(f"SecureCRT发送异常详情: {traceback.format_exc()}")
             # 发送失败，增加延迟，确保下一次发送成功
             self.adjust_delay(terminal_type, success=False)
             return False
@@ -3008,14 +3046,33 @@ class CommandSenderApp:
             # 清空Canvas
             self.send_buttons_canvas.delete("all")
             
-            # 获取文本编辑器的行高
-            line_height = 20  # 基于字体大小的估计值
+            # 动态获取文本编辑器的实际行高
+            try:
+                # 创建一个临时文本来测量行高
+                temp_index = self.text_editor.index('1.0')
+                # 获取行高
+                bbox = self.text_editor.bbox(temp_index)
+                if bbox:
+                    # bbox的返回值是 (x, y, width, height)
+                    line_height = bbox[3] - bbox[1]
+                    logger.info(f"动态计算行高: {line_height}")
+                else:
+                    # 如果bbox获取失败，使用默认值
+                    line_height = 20
+                    logger.warning("使用默认行高: 20")
+            except Exception as e:
+                logger.warning(f"获取行高失败: {e}，使用默认值 20")
+                line_height = 20
             
             # 获取当前可见区域的起始行
-            start_line = int(self.text_editor.yview()[0] * int(self.text_editor.index('end-1c').split('.')[0]))
+            visible_info = self.text_editor.yview()
+            start_fraction = visible_info[0]
+            total_lines = int(self.text_editor.index('end-1c').split('.')[0])
+            start_line = int(start_fraction * total_lines)
             
             # 计算按钮位置
             x = 2
+            # 计算按钮的Y坐标，确保与文本行对齐
             btn_y = (line_num - start_line - 1) * line_height + 2
             
             # 创建按钮，直接绑定行号，避免lambda闭包问题
@@ -3028,8 +3085,8 @@ class CommandSenderApp:
                 style='SendButton.TButton'
             )
             
-            # 将按钮添加到Canvas，确保三角符能完全显示
-            btn_window = self.send_buttons_canvas.create_window(x, btn_y, anchor=tk.NW, window=btn, width=30, height=24)
+            # 将按钮添加到Canvas，确保三角符能完全显示，高度与行高一致
+            btn_window = self.send_buttons_canvas.create_window(x, btn_y, anchor=tk.NW, window=btn, width=30, height=line_height)
             
             # 保存按钮信息
             self.send_buttons[line_num] = btn
