@@ -448,7 +448,7 @@ class KeyboardSimulator:
             return False
     
     def send_text_securecrt(self, hwnd, text):
-        """SecureCRT特定文本发送策略 - 优化版，参考PowerShell实现"""
+        """SecureCRT特定文本发送策略 - 增强版，确保可靠性"""
         try:
             terminal_type = "securecrt"
             logger.info(f"开始向SecureCRT窗口发送文本: {hwnd}, 文本: {text!r}")
@@ -458,78 +458,67 @@ class KeyboardSimulator:
                 logger.error(f"{terminal_type} win32api或win32con未正确加载，无法发送命令")
                 return False
             
-            # 获取实际的SecureCRT输入窗口
-            actual_hwnd = hwnd
-            
-            # 检查窗口类名，了解SecureCRT窗口结构
-            window_class = self.win32gui.GetClassName(hwnd)
-            logger.info(f"SecureCRT窗口类名: {window_class}")
-            
-            # 遍历子窗口，查找可能的输入区域
+            # 增强：确保窗口在前台，提高发送成功率
             try:
-                child_windows = []
-                
-                def enum_child_callback(child_hwnd, param):
-                    param.append(child_hwnd)
-                    return True
-                
-                self.win32gui.EnumChildWindows(hwnd, enum_child_callback, child_windows)
-                logger.info(f"找到 {len(child_windows)} 个子窗口")
-                
-                # 遍历子窗口，查找合适的输入窗口
-                for child_hwnd in child_windows:
-                    child_class = self.win32gui.GetClassName(child_hwnd)
-                    logger.info(f"子窗口 {child_hwnd}: 类名={child_class}")
-                    # 选择第一个子窗口作为实际输入区域
-                    actual_hwnd = child_hwnd
-                    break
-                
-                logger.info(f"使用窗口 {actual_hwnd} 作为实际输入区域")
+                # 检查窗口是否在前台
+                if win32gui.GetForegroundWindow() != hwnd:
+                    logger.info(f"SecureCRT窗口不在前台，尝试获取焦点")
+                    # 先显示窗口，确保可见
+                    win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                    time.sleep(0.1)
+                    # 先发送WM_SETFOCUS消息
+                    win32gui.PostMessage(hwnd, win32con.WM_SETFOCUS, 0, 0)
+                    time.sleep(0.1)
+                    # 再尝试设置前台窗口
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.3)  # 增加等待时间，确保窗口获得焦点
+                    logger.info(f"SecureCRT窗口已获得焦点")
             except Exception as e:
-                logger.warning(f"获取SecureCRT子窗口失败: {e}，使用主窗口作为输入区域")
+                logger.warning(f"获取窗口焦点失败: {e}")
             
-            # 从延迟缓存中获取当前终端的最佳延迟值
-            base_delay = self.delay_cache.get(terminal_type, 0.01)
-            logger.info(f"使用{terminal_type}延迟: {base_delay} 秒")
+            # 直接使用传入的窗口句柄
+            actual_hwnd = hwnd
+            logger.info(f"使用SecureCRT窗口: {actual_hwnd}")
+            
+            # 增强：使用更可靠的延迟设置
+            delay = 0.03  # 增加延迟，确保SecureCRT能处理每个字符
+            logger.info(f"SecureCRT发送延迟设置: {delay} 秒")
             
             # 发送逻辑
             win32api = self.win32api
             win32con = self.win32con
             post_message = win32api.PostMessage
             wm_char = win32con.WM_CHAR
+            wm_keydown = win32con.WM_KEYDOWN
+            wm_keyup = win32con.WM_KEYUP
             sleep = time.sleep
             
-            # 使用缓存的延迟
-            delay = base_delay
-            logger.info(f"SecureCRT发送延迟设置: {delay} 秒")
-            
-            # 优化的字符发送逻辑
+            # 增强：使用完整的按键事件序列，确保每个字符都被正确处理
             for i, char in enumerate(text):
                 char_code = ord(char)
                 logger.debug(f"SecureCRT发送第 {i+1}/{len(text)} 个字符: {char!r}, 字符码: {char_code}")
                 
-                # 发送字符，包括空格，只发送WM_CHAR消息
-                post_message(actual_hwnd, wm_char, char_code, 0)
+                # 发送完整的按键事件序列
+                # 1. 发送WM_KEYDOWN消息
+                post_message(actual_hwnd, wm_keydown, char_code, 0)
+                sleep(delay / 2)
                 
-                # 根据字符类型动态调整延迟
-                if char == ' ':
-                    # 空格字符使用适中延迟
-                    sleep(delay)
-                elif char in '!@#$%^&*()_+-=[]{}|;:,.<>?':
-                    # 特殊字符使用较长延迟
-                    sleep(delay * 1.5)
-                else:
-                    # 普通字符使用标准发送方式，使用适中延迟
-                    sleep(delay)
+                # 2. 发送WM_CHAR消息
+                post_message(actual_hwnd, wm_char, char_code, 0)
+                sleep(delay / 2)
+                
+                # 3. 发送WM_KEYUP消息
+                post_message(actual_hwnd, wm_keyup, char_code, 0)
+                sleep(delay)
             
-            # 发送成功，尝试微调延迟，减少下一次发送的延迟
+            # 发送成功，尝试微调延迟
             self.adjust_delay(terminal_type, success=True)
             logger.info(f"SecureCRT文本发送成功: {text!r}")
             return True
         except Exception as e:
             logger.error(f"{terminal_type}文本发送失败: {e}")
             logger.debug(f"SecureCRT发送异常详情: {traceback.format_exc()}")
-            # 发送失败，增加延迟，确保下一次发送成功
+            # 发送失败，增加延迟
             self.adjust_delay(terminal_type, success=False)
             return False
     
@@ -1661,6 +1650,9 @@ class CommandSenderApp:
         self.text_editor.bind("<Button-5>", self.sync_scroll)  # Linux
         self.text_editor.bind("<Key>", self.sync_scroll)
         self.text_editor.bind("<Button-1>", self.sync_scroll)
+        
+        # 添加滚动事件监听器，确保拖动滚动条时按钮位置也能更新
+        self.text_editor.bind("<Configure>", self.sync_scroll)
         
         # 绑定点击事件，用于显示发送按钮
         self.text_editor.bind("<Button-1>", self.on_text_click, add="+")
@@ -2965,13 +2957,20 @@ class CommandSenderApp:
         self.update_line_numbers()
     
     def sync_scroll(self, event=None):
-        """同步滚动条和行号"""
+        """同步滚动条、行号和发送按钮"""
         try:
             # 确保行号和文本区域同步
             self.line_numbers.yview_moveto(self.text_editor.yview()[0])
             
+            # 同步发送按钮Canvas滚动，确保按钮跟随文本滚动
+            self.send_buttons_canvas.yview_moveto(self.text_editor.yview()[0])
+            
             # 更新行号显示
             self.update_line_numbers()
+            
+            # 如果有可见的发送按钮，更新其位置，确保与对应行对齐
+            if self.send_buttons and self.current_visible_line:
+                self.show_send_button(self.current_visible_line)
         except Exception as e:
             logger.error(f"同步滚动失败: {e}")
     
@@ -3046,47 +3045,51 @@ class CommandSenderApp:
             # 清空Canvas
             self.send_buttons_canvas.delete("all")
             
-            # 动态获取文本编辑器的实际行高
-            try:
-                # 创建一个临时文本来测量行高
-                temp_index = self.text_editor.index('1.0')
-                # 获取行高
-                bbox = self.text_editor.bbox(temp_index)
-                if bbox:
-                    # bbox的返回值是 (x, y, width, height)
-                    line_height = bbox[3] - bbox[1]
-                    logger.info(f"动态计算行高: {line_height}")
-                else:
-                    # 如果bbox获取失败，使用默认值
-                    line_height = 20
-                    logger.warning("使用默认行高: 20")
-            except Exception as e:
-                logger.warning(f"获取行高失败: {e}，使用默认值 20")
-                line_height = 20
+            # 增强：使用更精确的按钮位置计算方法，直接获取指定行的实际位置
+            line_index = f"{line_num}.0"
+            line_bbox = self.text_editor.bbox(line_index)
             
-            # 获取当前可见区域的起始行
-            visible_info = self.text_editor.yview()
-            start_fraction = visible_info[0]
-            total_lines = int(self.text_editor.index('end-1c').split('.')[0])
-            start_line = int(start_fraction * total_lines)
+            if line_bbox:
+                # 行可见，直接使用行的实际Y坐标
+                line_x, line_y, line_width, line_height = line_bbox
+                x = 2
+                # 按钮Y坐标 = 行Y坐标 + 垂直居中调整
+                btn_y = line_y + (line_height - 24) / 2  # 24是按钮高度，垂直居中
+            else:
+                # 行不可见，使用备用方法
+                # 获取当前可见区域的起始行
+                visible_info = self.text_editor.yview()
+                start_fraction = visible_info[0]
+                total_lines = int(self.text_editor.index('end-1c').split('.')[0])
+                start_line = int(start_fraction * total_lines)
+                
+                # 使用字体信息获取行高
+                try:
+                    font = self.text_editor.cget("font")
+                    if isinstance(font, str):
+                        import tkinter.font as tkfont
+                        font_obj = tkfont.Font(family=font, size=10)
+                        line_height = font_obj.metrics("linespace")
+                    else:
+                        line_height = font.metrics("linespace")
+                except:
+                    line_height = 24  # 默认行高
+                
+                # 计算按钮位置
+                x = 2
+                btn_y = (line_num - start_line - 1) * line_height + 2
             
-            # 计算按钮位置
-            x = 2
-            # 计算按钮的Y坐标，确保与文本行对齐
-            btn_y = (line_num - start_line - 1) * line_height + 2
-            
-            # 创建按钮，直接绑定行号，避免lambda闭包问题
-            # 优化：使用清晰的三角符和合适的按钮尺寸
+            # 创建按钮，恢复原始样式
             btn = ttk.Button(
                 self.send_buttons_canvas,
-                text="▶",  # 使用更清晰的三角符号
-                width=3,  # 适当增大宽度
+                text="▶",  # 使用原始三角符号
+                width=2,  # 恢复原始宽度
                 command=lambda line_num=line_num: self.send_line_command(line_num),
                 style='SendButton.TButton'
             )
             
-            # 将按钮添加到Canvas，确保三角符能完全显示，高度与行高一致
-            btn_window = self.send_buttons_canvas.create_window(x, btn_y, anchor=tk.NW, window=btn, width=30, height=line_height)
+            # 将按钮添加到Canvas，恢复原始尺寸
+            btn_window = self.send_buttons_canvas.create_window(x, btn_y, anchor=tk.NW, window=btn, width=24, height=24)
             
             # 保存按钮信息
             self.send_buttons[line_num] = btn
